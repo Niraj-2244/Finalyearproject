@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import pickle
@@ -5,8 +6,14 @@ from sklearn.preprocessing import StandardScaler
 import hashlib
 
 # Load the model
-with open("D:/Finalyearproject/mushroom-farming-app/models/final_mushroom.pkl", 'rb') as file:
-    model = pickle.load(file)
+with open("./models/casing_quality.pkl", 'rb') as file:
+    casing_model = pickle.load(file)
+
+    # with open("D:/Finalyearproject/mushroom-farming-app/models/disease_detection.pkl", 'rb') as file:
+    # disease_model = pickle.load(file)
+
+    # with open("D:\Finalyearproject\mushroom-farming-app\models\disease_detection.pkl", 'rb') as file:
+    # harvest_model = pickle.load(file)
 
 # Function to hash passwords
 def hash_password(password):
@@ -80,7 +87,7 @@ if 'logged_in' in st.session_state and st.session_state['logged_in']:
 
     # Make a prediction
     if st.button("Predict"):
-        prediction = model.predict(input_data_scaled)
+        prediction = casing_model.predict(input_data_scaled)
         st.write("Prediction:", prediction)
 else:
     st.write("Please login to access the features.")

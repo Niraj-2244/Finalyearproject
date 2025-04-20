@@ -1,250 +1,231 @@
 import streamlit as st
 import pandas as pd
 import pickle
-import numpy as np
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
+import os
 import hashlib
+from typing import Optional, Tuple
 
-# Set page config
+
+# Set page configuration
 st.set_page_config(page_title="Mushroom Farming Assistant", layout="wide")
 
-# Load models (replace with your actual model loading code)
+# --- Model Loading Utilities ---
+def verify_model_files() -> list:
+    required_files = [
+        './models/casing_quality.pkl',
+        './models/disease_detection.pkl',
+        './models/harvest_prediction.pkl'
+    ]
+    return [f for f in required_files if not os.path.exists(f)]
+
 @st.cache_resource
-def load_models():
-    try:
-        # Casing model
-        with open("D:/Finalyearproject/mushroom-farming-app/models/casing_quality.pkl", 'rb') as f:
-            casing_model = pickle.load(f)
-
-        # Disease model
-        with open("D:Finalyearproject/mushroom-farming-app/models/disease_detection.pkl", 'rb') as f:
-            disease_data = pickle.load(f)
-            disease_model = disease_data['model']
-            disease_preprocessor = disease_data['preprocessor']
-
-        # Harvest model
-        with open("D:/Finalyearproject/mushroom-farming-app/models/harvest_prediction.pkl", 'rb') as f:
-            harvest_data = pickle.load(f)
-            harvest_model = harvest_data['model']
-            harvest_preprocessor = harvest_data['preprocessor']
-
-        return casing_model, disease_model, disease_preprocessor, harvest_model, harvest_preprocessor
-
-    except Exception as e:
-        st.error(f"Error loading models: {e}")
+def load_models() -> Tuple[Optional[object], Optional[object], Optional[object], Optional[object], Optional[object]]:
+    missing_files = verify_model_files()
+    if missing_files:
+        st.error(f"Missing model files: {', '.join(missing_files)}")
         return None, None, None, None, None
 
-casing_model, disease_model, disease_preprocessor, harvest_model, harvest_preprocessor = load_models()
+    def safe_load(path: str, requires_preprocessor: bool = False):
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            if requires_preprocessor:
+                if not isinstance(data, dict) or 'model' not in data or 'preprocessor' not in data:
+                    return None, None, f"Invalid format in {os.path.basename(path)}"
+                return data['model'], data['preprocessor'], None
+            return data, None, None
+        except Exception as e:
+            return None, None, str(e)
 
-# Initialize session state for user authentication
-if 'logged_in' not in st.session_state:
-    st.session_state.logged_in = False
-if 'users' not in st.session_state:
-    st.session_state.users = {}
+    casing_model, _, casing_error = safe_load('./models/casing_quality.pkl')
+    disease_model, disease_preprocessor, disease_error = safe_load('./models/disease_detection.pkl', True)
+    harvest_model, harvest_preprocessor, harvest_error = safe_load('./models/harvest_prediction.pkl', True)
 
-# Function to hash passwords
-def hash_password(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+    for error in [casing_error, disease_error, harvest_error]:
+        if error:
+            st.error(f"Model loading error: {error}")
 
-# Function to register a new user
+    return casing_model, disease_model, disease_preprocessor, harvest_model, harvest_preprocessor
+
+# --- Auth ---
+def initialize_session():
+    if 'logged_in' not in st.session_state:
+        st.session_state.logged_in = False
+    if 'username' not in st.session_state:
+        st.session_state.username = None
+    if 'users' not in st.session_state:
+        st.session_state.users = {}
+
+def hash_password(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
+
 def register_user(username, password):
     if username in st.session_state.users:
-        return "Username already exists. Please choose another one."
+        return "Username exists."
     st.session_state.users[username] = hash_password(password)
-    return "Registration successful! Please log in."
+    return "Registered."
 
-# Function to log in a user
 def login_user(username, password):
     if username not in st.session_state.users:
-        return "Username not found. Please register first."
+        return "Username not found."
     if st.session_state.users[username] != hash_password(password):
-        return "Incorrect password. Please try again."
+        return "Wrong password."
     st.session_state.logged_in = True
-    return "Login successful!"
+    st.session_state.username = username
+    return "Logged in."
 
-# Login/Register page
-if not st.session_state.logged_in:
-    st.title("Login/Register")
-    choice = st.selectbox("Choose an option", ["Login", "Register"])
+# --- Prediction Logic ---
+def predict_casing(model, ph, whc, temp, hum, ec):
+    if not model:
+        return None, "Model missing."
+    try:
+        df = pd.DataFrame([[ph, whc, temp, hum, ec]], columns=['pH', 'WHC', 'Temperature', 'Humidity', 'EC'])
+        pred = model.predict(df)[0]
+        proba = model.predict_proba(df)[0][1] if hasattr(model, 'predict_proba') else None
+        return {'prediction': 'Good' if pred else 'Poor', 'probability': proba}, None
+    except Exception as e:
+        return None, str(e)
 
-    if choice == "Login":
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            message = login_user(username, password)
-            st.write(message)
-    else:
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        if st.button("Register"):
-            message = register_user(username, password)
-            st.write(message)
-else:
-    # App title and description
-    st.title("🍄 Mushroom Farming Assistant")
-    st.markdown("""
-    This app helps mushroom farmers predict:
-    - **Casing Quality** (Good/Poor)
-    - **Disease Risk** (High/Low)
-    - **Expected Harvest** (in kg)
+def predict_disease(model, prep, ph, temp, hum, vent, light, co2):
+    if not model or not prep:
+        return None, "Model or preprocessor missing."
+    try:
+        df = pd.DataFrame([[ph, temp, hum, vent, light, co2]],
+                          columns=['pH', 'Temperature', 'Humidity', 'Ventilation', 'Light_Intensity', 'CO2_Level'])
+        proc = prep.transform(df)
+        pred = model.predict(proc)[0]
+        proba = model.predict_proba(proc)[0][1] if hasattr(model, 'predict_proba') else None
+        return {'prediction': 'High' if pred else 'Low', 'probability': proba}, None
+    except Exception as e:
+        return None, str(e)
 
-    Adjust the parameters in the sidebar and see the predictions!
-    """)
+def predict_harvest(model, prep, bags, spawn, casing, days):
+    if not model or not prep:
+        return None, "Model or preprocessor missing."
+    try:
+        df = pd.DataFrame([[bags, spawn, casing, days]],
+                          columns=['Bags', 'Spawn_Type', 'Casing_Type', 'Days_Since_Casing'])
+        proc = prep.transform(df)
+        pred = model.predict(proc)[0]
+        return {'yield': pred}, None
+    except Exception as e:
+        return None, str(e)
 
-    # Sidebar for input parameters
-    st.sidebar.header("Farm Parameters")
+# --- App ---
+def main():
+    initialize_session()
+    casing_model, disease_model, disease_pre, harvest_model, harvest_pre = load_models()
 
-    # Create tabs for different predictions
+    if not st.session_state.logged_in:
+        st.title("Button Mushroom Farming Assistant")
+        login, register = st.tabs(["Login", "Register"])
+
+        with login:
+            with st.form("login_form"):
+                u = st.text_input("Username")
+                p = st.text_input("Password", type="password")
+                if st.form_submit_button("Login"):
+                    msg = login_user(u, p)
+                    if st.session_state.logged_in:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+        with register:
+            with st.form("register_form"):
+                u = st.text_input("Username")
+                p = st.text_input("Password", type="password")
+                if st.form_submit_button("Register"):
+                    st.success(register_user(u, p))
+        return
+
+    st.title("Button Mushroom Farming Assistant")
+    st.markdown(f"Welcome, **{st.session_state.username}**!")
+
     tab1, tab2, tab3 = st.tabs(["Casing Quality", "Disease Risk", "Harvest Prediction"])
 
-    # Casing Quality Prediction
     with tab1:
-        st.header("Casing Quality Prediction")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            ph = st.slider("pH Level", 5.0, 8.5, 6.8, 0.1, key="casing_ph")
-            whc = st.slider("Water Holding Capacity (%)", 50, 90, 75, 1, key="casing_whc")
-
-        with col2:
-            temp = st.slider("Temperature (°C)", 18, 30, 23, 1, key="casing_temp")
-            humidity = st.slider("Humidity (%)", 60, 95, 80, 1, key="casing_humidity")
-            ec = st.slider("EC (µS/cm)", 100, 1000, 350, 10, key="casing_ec")
-
-        if st.button("Predict Casing Quality", key="predict_casing"):
-            if casing_model is not None:
-                input_data = pd.DataFrame([[ph, whc, temp, humidity, ec]],
-                                        columns=['pH', 'WHC', 'Temperature', 'Humidity', 'EC'])
-                prediction = casing_model.predict(input_data)[0]
-                proba = casing_model.predict_proba(input_data)[0]
-
-                st.subheader("Prediction Result")
-                if prediction == 1:
-                    st.success("✅ Good Casing Quality")
-                    st.metric("Probability", f"{proba[1]*100:.1f}%")
+        st.header("Casing Quality")
+        if not casing_model:
+            st.error("Casing model missing.")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                ph = st.slider("pH", 5.0, 8.5, 6.8, 0.1)
+                whc = st.slider("WHC (%)", 50, 90, 75, 1)
+            with c2:
+                temp = st.slider("Temp (°C)", 18, 30, 23)
+                hum = st.slider("Humidity (%)", 60, 95, 80)
+                ec = st.slider("EC", 100, 1000, 350, 10)
+            if st.button("Predict Casing"):
+                res, err = predict_casing(casing_model, ph, whc, temp, hum, ec)
+                if err:
+                    st.error(err)
                 else:
-                    st.warning("⚠️ Poor Casing Quality")
-                    st.metric("Probability", f"{proba[0]*100:.1f}%")
+                    st.success(f"{res['prediction']} quality")
+                    if res['probability'] is not None:
+                        st.metric("Probability", f"{res['probability']*100:.1f}%")
+        st.area_chart(casing_model)
+        st.scatter_chart(casing_model)
+        st.bar_chart(casing_model)
+        
 
-                # Show feature importance if available
-                if hasattr(casing_model, 'feature_importances_'):
-                    st.subheader("Key Factors")
-                    features = ['pH', 'WHC', 'Temperature', 'Humidity', 'EC']
-                    importance = casing_model.feature_importances_
-                    importance_df = pd.DataFrame({'Feature': features, 'Importance': importance})
-                    importance_df = importance_df.sort_values('Importance', ascending=False)
-                    st.bar_chart(importance_df.set_index('Feature'))
-            else:
-                st.error("Casing model not loaded properly")
-
-    # Disease Risk Prediction
     with tab2:
-        st.header("Disease Risk Prediction")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            d_ph = st.slider("pH Level", 5.0, 8.5, 6.8, 0.1, key="disease_ph")
-            d_temp = st.slider("Temperature (°C)", 18, 30, 23, 1, key="disease_temp")
-            d_humidity = st.slider("Humidity (%)", 60, 95, 80, 1, key="disease_humidity")
-
-        with col2:
-            d_light = st.slider("Light Intensity (lux)", 100, 1000, 500, 10, key="disease_light")
-            d_co2 = st.slider("CO₂ Level (ppm)", 800, 2000, 1200, 10, key="disease_co2")
-            d_ventilation = st.selectbox("Ventilation", ["Low", "Medium", "High"], key="disease_ventilation")
-
-        if st.button("Predict Disease Risk", key="predict_disease"):
-            if disease_model is not None and disease_preprocessor is not None:
-                input_data = pd.DataFrame([[d_ph, d_temp, d_humidity, d_ventilation, d_light, d_co2]],
-                                        columns=['pH', 'Temperature', 'Humidity', 'Ventilation', 'Light_Intensity', 'CO2_Level'])
-
-                # Preprocess the input
-                processed_data = disease_preprocessor.transform(input_data)
-
-                # Make prediction
-                prediction = disease_model.predict(processed_data)[0]
-                proba = disease_model.predict_proba(processed_data)[0]
-
-                st.subheader("Prediction Result")
-                if prediction == 1:
-                    st.error("🚨 High Disease Risk")
-                    st.metric("Probability", f"{proba[1]*100:.1f}%")
-
-                    st.subheader("Recommendations")
-                    st.markdown("""
-                    - Improve ventilation
-                    - Monitor humidity levels
-                    - Check for early signs of contamination
-                    - Consider adjusting temperature
-                    """)
+        st.header("Disease Risk")
+        if not disease_model or not disease_pre:
+            st.error("Disease model/preprocessor missing.")
+        else:
+            d1, d2 = st.columns(2)
+            with d1:
+                ph = st.slider("pH", 5.0, 8.5, 6.8, 0.1, key="dph")
+                temp = st.slider("Temp", 18, 30, 23, key="dtemp")
+                hum = st.slider("Humidity", 60, 95, 80, key="dhum")
+            with d2:
+                light = st.slider("Light (lux)", 100, 1000, 500, key="dlight")
+                co2 = st.slider("CO2 (ppm)", 800, 2000, 1200, key="dco2")
+                vent = st.selectbox("Ventilation", ["Low", "Medium", "High"], key="dvent")
+            if st.button("Predict Disease"):
+                res, err = predict_disease(disease_model, disease_pre, ph, temp, hum, vent, light, co2)
+                if err:
+                    st.error(err)
                 else:
-                    st.success("✅ Low Disease Risk")
-                    st.metric("Probability", f"{proba[0]*100:.1f}%")
+                    color = "error" if res['prediction'] == 'High' else "success"
+                    getattr(st, color)(f"Disease Risk: {res['prediction']}")
+                    if res['probability'] is not None:
+                        st.metric("Probability", f"{res['probability']*100:.1f}%")
+        st.area_chart(disease_model)
+        st.scatter_chart(disease_model)
+        st.bar_chart(disease_model)
+        
 
-                    st.subheader("Maintenance Tips")
-                    st.markdown("""
-                    - Continue current practices
-                    - Regular monitoring recommended
-                    - Maintain proper hygiene
-                    """)
-            else:
-                st.error("Disease model not loaded properly")
-
-    # Harvest Prediction
     with tab3:
         st.header("Harvest Prediction")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            h_bags = st.slider("Number of Bags", 50, 500, 200, 10, key="harvest_bags")
-            h_days = st.slider("Days Since Casing", 1, 30, 15, 1, key="harvest_days")
-
-        with col2:
-            h_spawn = st.selectbox("Spawn Type", ["Strain1", "Strain2", "Strain3"], key="harvest_spawn")
-            h_casing = st.selectbox("Casing Type", ["Peat", "Coconut", "Pine"], key="harvest_casing")
-
-        if st.button("Predict Harvest", key="predict_harvest"):
-            if harvest_model is not None and harvest_preprocessor is not None:
-                input_data = pd.DataFrame([[h_bags, h_spawn, h_casing, h_days]],
-                                        columns=['Bags', 'Spawn_Type', 'Casing_Type', 'Days_Since_Casing'])
-
-                # Preprocess the input
-                processed_data = harvest_preprocessor.transform(input_data)
-
-                # Make prediction
-                prediction = harvest_model.predict(processed_data)[0]
-
-                st.subheader("Prediction Result")
-                st.metric("Expected Harvest", f"{prediction:.1f} kg")
-
-                # Show some context
-                if prediction > 300:
-                    st.success("Excellent expected yield!")
-                elif prediction > 200:
-                    st.info("Good expected yield")
+        if not harvest_model or not harvest_pre:
+            st.error("Harvest model/preprocessor missing.")
+        else:
+            h1, h2 = st.columns(2)
+            with h1:
+                bags = st.slider("Bags", 50, 500, 200, 10)
+                days = st.slider("Days", 1, 30, 15)
+            with h2:
+                spawn = st.selectbox("Spawn Type", ["Strain1", "Strain2", "Strain3"])
+                casing = st.selectbox("Casing Type", ["Peat", "Coconut", "Pine"])
+            if st.button("Predict Harvest"):
+                res, err = predict_harvest(harvest_model, harvest_pre, bags, spawn, casing, days)
+                
+                if err:
+                    st.error(err)
                 else:
-                    st.warning("Below average expected yield")
+                    st.metric("Expected Yield", f"{res['yield']:.1f} kg")
+        st.area_chart(harvest_model)
+        st.scatter_chart(harvest_model)
+        st.bar_chart(harvest_model)
 
-                st.subheader("Optimization Tips")
-                st.markdown("""
-                - Consider adjusting spawn to casing ratio
-                - Monitor environmental conditions
-                - Review sterilization procedures
-                """)
-            else:
-                st.error("Harvest model not loaded properly")
-
-    # Footer
-    st.markdown("---")
-    st.markdown("""
-    *Note: Predictions are based on machine learning models trained on synthetic data.
-    For actual farming decisions, consult with agricultural experts.*
-    """)
-
-    # Logout button
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
-        st.experimental_rerun()
+        st.session_state.username = None
+        st.rerun()
+
+if __name__ == "__main__":
+    main()
